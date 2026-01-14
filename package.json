@@ -1,0 +1,21 @@
+{
+  "name": "quotidian-reel",
+  "version": "1.0.0",
+  "description": "Automated Instagram Reel generator for Quotidian daily puzzles",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "generate": "node src/index.js",
+    "test": "node src/test.js"
+  },
+  "keywords": ["instagram", "reel", "video", "quotidian"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "canvas": "^2.11.2",
+    "fluent-ffmpeg": "^2.1.2"
+  },
+  "devDependencies": {
+    "@types/fluent-ffmpeg": "^2.1.24"
+  }
+}
