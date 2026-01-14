@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import subprocess
 import random
 import re
+import math
 
 
 @dataclass
@@ -181,6 +182,26 @@ def get_font(size: int, bold: bool = False, family: str = "serif", italic: bool 
 def measure_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) -> Tuple[int, int]:
     bbox = draw.textbbox((0, 0), text, font=font)
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+    words = text.split()
+    if not words:
+        return [text]
+
+    lines = []
+    current = []
+    for word in words:
+        test_line = " ".join(current + [word])
+        width, _ = measure_text(draw, test_line, font)
+        if width <= max_width or not current:
+            current.append(word)
+        else:
+            lines.append(" ".join(current))
+            current = [word]
+    if current:
+        lines.append(" ".join(current))
+    return lines
 
 
 class GameState:
@@ -419,6 +440,70 @@ class GameplayRenderer:
         base = self.render(state, dissolve_progress=0.0)
         won = self.render_won(state)
         return Image.blend(base, won, progress)
+
+    def render_quote_image(self, quote: Quote) -> Image.Image:
+        """Render a standalone quote image"""
+        img = Image.new('RGB', (self.config.WIDTH, self.config.HEIGHT), self.config.BG)
+        draw = ImageDraw.Draw(img, 'RGB')
+
+        max_width = int(self.config.WIDTH * 0.78)
+        top_margin = int(self.config.HEIGHT * 0.12)
+        bottom_margin = int(self.config.HEIGHT * 0.12)
+
+        brand_text = "Quotidian"
+        brand_font = get_font(int(self.config.WIDTH * 0.05), bold=True, family="serif")
+
+        brand_height = measure_text(draw, brand_text, brand_font)[1]
+        brand_block_height = brand_height
+
+        quote_area_top = top_margin
+        quote_area_bottom = self.config.HEIGHT - bottom_margin - brand_block_height
+        available_height = max(0, quote_area_bottom - quote_area_top)
+
+        author_text = quote.author.upper()
+        author_font = get_font(int(self.config.WIDTH * 0.024), bold=True, family="sans")
+        author_height = measure_text(draw, author_text, author_font)[1]
+        author_gap = int(self.config.HEIGHT * 0.02)
+
+        quote_max_height = max(0, available_height - author_height - author_gap)
+
+        quote_text = f"\"{quote.text}\""
+        quote_font = get_font(int(self.config.WIDTH * 0.065), bold=True, family="serif")
+        quote_lines = wrap_text(draw, quote_text, quote_font, max_width)
+        line_height = measure_text(draw, "Ag", quote_font)[1]
+        line_spacing = int(line_height * 0.25)
+        quote_block_height = (line_height * len(quote_lines)) + (line_spacing * max(0, len(quote_lines) - 1))
+
+        for size in range(int(self.config.WIDTH * 0.065), int(self.config.WIDTH * 0.04), -2):
+            quote_font = get_font(size, bold=True, family="serif")
+            quote_lines = wrap_text(draw, quote_text, quote_font, max_width)
+            line_height = measure_text(draw, "Ag", quote_font)[1]
+            line_spacing = int(line_height * 0.25)
+            quote_block_height = (line_height * len(quote_lines)) + (line_spacing * max(0, len(quote_lines) - 1))
+            if quote_block_height <= quote_max_height:
+                break
+
+        total_block_height = quote_block_height + author_gap + author_height
+        start_y = quote_area_top + int((available_height - total_block_height) / 2)
+
+        current_y = start_y
+        for line in quote_lines:
+            line_width, _ = measure_text(draw, line, quote_font)
+            line_x = int((self.config.WIDTH - line_width) / 2)
+            draw.text((line_x, current_y), line, font=quote_font, fill=self.config.INK)
+            current_y += line_height + line_spacing
+
+        current_y += author_gap - line_spacing
+        author_width, _ = measure_text(draw, author_text, author_font)
+        author_x = int((self.config.WIDTH - author_width) / 2)
+        draw.text((author_x, current_y), author_text, font=author_font, fill=self.config.STONE_500)
+
+        brand_width, _ = measure_text(draw, brand_text, brand_font)
+        brand_x = int((self.config.WIDTH - brand_width) / 2)
+        brand_y = self.config.HEIGHT - bottom_margin - brand_block_height - 40
+        draw.text((brand_x, brand_y), brand_text, font=brand_font, fill=self.config.STONE_500)
+
+        return img
 
     def _draw_won_grid(self, draw: ImageDraw.ImageDraw, state: GameState, grid_x: int, grid_y: int):
         letter_font_size = int(self.config.CELL_SIZE * 0.78)
@@ -700,6 +785,31 @@ class ReelGenerator:
 
         return None
 
+    def _get_mean_volume_db(self, path: Path) -> Optional[float]:
+        if not path.exists():
+            return None
+
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
+                capture_output=True,
+                text=True,
+            )
+            match = re.search(r"mean_volume:\s*(-?\d+(\.\d+)?) dB", result.stderr)
+            if match:
+                return float(match.group(1))
+        except Exception:
+            pass
+
+        return None
+
+    def generate_cover_image(self, quote: Quote, output_path: str):
+        renderer = GameplayRenderer(self.config)
+        img = renderer.render_quote_image(quote)
+        img.save(output_path)
+        print(f"✓ Cover: {output_path}")
+        return output_path
+
     def generate_video(self, quote: Quote, output_path: str):
         """Generate gameplay reel - balanced timing"""
 
@@ -841,15 +951,31 @@ class ReelGenerator:
 
         input_index = 1
 
+        music_gain_db = None
+        max_music_boost_db = 6.0
+        fallback_music_boost_db = 4.0
+        win_volume = 0.7
+
+        if self.background_music.exists() and self.win_fanfare.exists():
+            music_mean = self._get_mean_volume_db(self.background_music)
+            win_mean = self._get_mean_volume_db(self.win_fanfare)
+            if music_mean is not None and win_mean is not None:
+                win_target = win_mean + (20 * math.log10(win_volume))
+                boost_db = win_target - music_mean
+                if boost_db > 0:
+                    music_gain_db = min(boost_db, max_music_boost_db)
+
         if self.background_music.exists():
             audio_inputs.append(str(self.background_music))
+            if music_gain_db is None:
+                music_gain_db = fallback_music_boost_db
+
+            music_filters = [f"volume={music_gain_db:.2f}dB"]
             if reveal_start > 0:
                 fade_end = reveal_start + 1.0
-                filter_parts.append(
-                    f"[{input_index}:a]volume=1.2,afade=t=out:st={reveal_start:.3f}:d=1.0,atrim=0:{fade_end:.3f}[music]"
-                )
-            else:
-                filter_parts.append(f"[{input_index}:a]volume=1.2[music]")
+                music_filters.append(f"afade=t=out:st={reveal_start:.3f}:d=1.0")
+                music_filters.append(f"atrim=0:{fade_end:.3f}")
+            filter_parts.append(f"[{input_index}:a]{','.join(music_filters)}[music]")
             labels.append("music")
             input_index += 1
 
@@ -867,7 +993,7 @@ class ReelGenerator:
                           capture_output=True)
             audio_inputs.append(str(wav))
             delay_ms = max(0, int(win_delay * 1000))
-            filter_parts.append(f"[{input_index}:a]adelay={delay_ms}|{delay_ms},volume=0.7[win]")
+            filter_parts.append(f"[{input_index}:a]adelay={delay_ms}|{delay_ms},volume={win_volume}[win]")
             labels.append("win")
             input_index += 1
 
@@ -957,6 +1083,8 @@ def main():
     date_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     video_path = output_dir / f"quotidian-reel-{date_str}.mp4"
     generator.generate_video(quote, str(video_path))
+    cover_path = output_dir / f"quotidian-cover-{date_str}.png"
+    generator.generate_cover_image(quote, str(cover_path))
 
     print("\n✨ Done!")
 
