@@ -844,8 +844,9 @@ class ReelGenerator:
         if self.background_music.exists():
             audio_inputs.append(str(self.background_music))
             if reveal_start > 0:
+                fade_end = reveal_start + 1.0
                 filter_parts.append(
-                    f"[{input_index}:a]volume=1.2,afade=t=out:st={reveal_start:.3f}:d=1.0[music]"
+                    f"[{input_index}:a]volume=1.2,afade=t=out:st={reveal_start:.3f}:d=1.0,atrim=0:{fade_end:.3f}[music]"
                 )
             else:
                 filter_parts.append(f"[{input_index}:a]volume=1.2[music]")
